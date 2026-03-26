@@ -13,36 +13,36 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json());
 
-// 🔥 Supabase setup
+// ✅ YOUR SUPABASE CONFIG
 const supabase = createClient(
-  "YOUR_SUPABASE_URL",
-  "YOUR_SUPABASE_ANON_KEY"
+  "https://glbkettiwejweqfhhros.supabase.co",
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdsYmtldHRpd2Vqd2VxZmhocm9zIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ1MzQwMTUsImV4cCI6MjA5MDExMDAxNX0.1Dmt6fzX7L3B-OvtGfqoeOa2hm8isbMXpjeDA2fyEG8"
 );
 
-// Socket connection
+// Socket
 io.on("connection", (socket) => {
   console.log("User connected");
 
-  // Send old messages
+  // Load old messages
   socket.on("loadMessages", async () => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("messages")
       .select("*")
       .order("id", { ascending: true });
 
-    socket.emit("oldMessages", data);
+    if (!error) {
+      socket.emit("oldMessages", data);
+    }
   });
 
-  // Receive message
+  // Send message
   socket.on("sendMessage", async (msgData) => {
     const { username, message } = msgData;
 
-    // Save to DB
     await supabase.from("messages").insert([
       { username, message }
     ]);
 
-    // Broadcast
     io.emit("receiveMessage", msgData);
   });
 
