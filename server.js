@@ -13,28 +13,27 @@ const io = new Server(server, {
   cors: { origin: "*" }
 });
 
-// ✅ MIDDLEWARE (IMPORTANT)
 app.use(cors());
 app.use(express.json());
 
-// ✅ DEBUG ROUTE (TEST THIS FIRST)
-app.get("/", (req, res) => {
-  res.send("Server working ✅");
-});
-
-// ✅ SUPABASE
+// ✅ Supabase
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_ANON_KEY
 );
 
-// In-memory store
+// Memory stores
 let sessions = {};
 let onlineUsers = {};
 
+// Test route
+app.get("/", (req, res) => {
+  res.send("Server working ✅");
+});
+
 // ================= AUTH =================
 
-// SIGNUP
+// Signup
 app.post("/signup", async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -43,7 +42,6 @@ app.post("/signup", async (req, res) => {
       return res.status(400).json({ error: "Missing fields" });
     }
 
-    // check existing user
     const { data: existing } = await supabase
       .from("users")
       .select("*")
@@ -73,7 +71,7 @@ app.post("/signup", async (req, res) => {
   }
 });
 
-// LOGIN
+// Login
 app.post("/login", async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -126,6 +124,7 @@ io.on("connection", (socket) => {
   socket.on("joinChat", ({ withUser }) => {
     const room = [socket.username, withUser].sort().join("_");
     socket.join(room);
+    socket.currentChat = withUser;
   });
 
   socket.on("loadChat", async ({ withUser }) => {
@@ -137,22 +136,36 @@ io.on("connection", (socket) => {
       )
       .order("id", { ascending: true });
 
-    socket.emit("chatHistory", data);
+    socket.emit("chatHistory", data || []);
   });
 
   socket.on("sendMessage", async ({ to, message }) => {
     const sender = socket.username;
 
-    await supabase.from("messages").insert([
+    const { error } = await supabase.from("messages").insert([
       { sender, receiver: to, message }
     ]);
 
+    if (error) {
+      console.log("DB ERROR:", error);
+      return;
+    }
+
     const room = [sender, to].sort().join("_");
 
+    // Send message
     io.to(room).emit("receiveMessage", {
       sender,
       message
     });
+
+    // 🔔 Notification (only if not in same chat)
+    if (onlineUsers[to]) {
+      io.to(onlineUsers[to]).emit("notification", {
+        from: sender,
+        message
+      });
+    }
   });
 
   socket.on("disconnect", () => {
