@@ -2,8 +2,6 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
-const bcrypt = require("bcrypt");
-const { v4: uuidv4 } = require("uuid");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
@@ -16,91 +14,33 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json());
 
+// Supabase
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_ANON_KEY
 );
 
-let sessions = {};
-let onlineUsers = {};
-
+// Test
 app.get("/", (req, res) => {
   res.send("Server working ✅");
 });
 
-// ===== AUTH =====
-
-app.post("/signup", async (req, res) => {
-  const { username, password } = req.body;
-
-  const hashed = await bcrypt.hash(password, 10);
-
-  const { error } = await supabase
-    .from("users")
-    .insert([{ username, password: hashed }]);
-
-  if (error) {
-    console.log("SIGNUP ERROR:", error);
-    return res.status(400).json({ error: "Signup failed" });
-  }
-
-  res.json({ message: "Signup success" });
-});
-
-app.post("/login", async (req, res) => {
-  const { username, password } = req.body;
-
-  const { data } = await supabase
-    .from("users")
-    .select("*")
-    .eq("username", username)
-    .single();
-
-  if (!data) return res.status(401).json({ error: "User not found" });
-
-  const valid = await bcrypt.compare(password, data.password);
-  if (!valid) return res.status(401).json({ error: "Wrong password" });
-
-  const token = uuidv4();
-  sessions[token] = username;
-
-  res.json({ token, username });
-});
-
-// ===== SOCKET =====
+// ================= SOCKET =================
 
 io.on("connection", (socket) => {
 
-  console.log("Socket connected");
+  console.log("User connected");
 
-  socket.on("authenticate", (token) => {
-    const username = sessions[token];
-
-    if (!username) return socket.disconnect();
-
+  socket.on("join", (username) => {
     socket.username = username;
-    onlineUsers[username] = socket.id;
-
-    console.log("User:", username);
-
-    io.emit("onlineUsers", Object.keys(onlineUsers));
+    console.log("Joined:", username);
   });
 
-  socket.on("joinChat", ({ withUser }) => {
-    const room = [socket.username, withUser].sort().join("_");
-    socket.join(room);
-    socket.currentChat = withUser;
-
-    console.log(socket.username, "joined", room);
-  });
-
-  socket.on("loadChat", async ({ withUser }) => {
+  // Load old messages
+  socket.on("loadMessages", async () => {
     const { data, error } = await supabase
       .from("messages")
       .select("*")
-      .or(
-        `and(sender.eq.${socket.username},receiver.eq.${withUser}),and(sender.eq.${withUser},receiver.eq.${socket.username})`
-      )
       .order("id", { ascending: true });
 
     if (error) {
@@ -111,50 +51,38 @@ io.on("connection", (socket) => {
     socket.emit("chatHistory", data || []);
   });
 
-  socket.on("sendMessage", async ({ to, message }) => {
-    const sender = socket.username;
+  // Send message
+  socket.on("sendMessage", async (message) => {
+    const username = socket.username;
 
-    console.log("TRY SAVE:", sender, to, message);
+    console.log("TRY SAVE:", username, message);
 
-    const { data, error } = await supabase
+    if (!username || !message) return;
+
+    const { error } = await supabase
       .from("messages")
-      .insert([{ sender, receiver: to, message }])
-      .select();
+      .insert([{ username, message }]);
 
     if (error) {
       console.log("❌ DB ERROR:", error);
       return;
     }
 
-    console.log("✅ SAVED:", data);
+    console.log("✅ SAVED");
 
-    const room = [sender, to].sort().join("_");
-
-    io.to(room).emit("receiveMessage", {
-      sender,
+    io.emit("receiveMessage", {
+      username,
       message
     });
 
-    // direct fallback (important)
-    if (onlineUsers[to]) {
-      io.to(onlineUsers[to]).emit("receiveMessage", {
-        sender,
-        message
-      });
-
-      if (socket.currentChat !== to) {
-        io.to(onlineUsers[to]).emit("notification", {
-          from: sender
-        });
-      }
-    }
+    // Notification (simple)
+    socket.broadcast.emit("notification", {
+      from: username
+    });
   });
 
   socket.on("disconnect", () => {
-    if (socket.username) {
-      delete onlineUsers[socket.username];
-      io.emit("onlineUsers", Object.keys(onlineUsers));
-    }
+    console.log("User disconnected");
   });
 });
 
