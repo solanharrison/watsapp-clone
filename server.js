@@ -16,7 +16,7 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json());
 
-// ✅ Supabase
+// Supabase
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_ANON_KEY
@@ -25,6 +25,7 @@ const supabase = createClient(
 // Memory stores
 let sessions = {};
 let onlineUsers = {};
+let userSockets = {};
 
 // Test route
 app.get("/", (req, res) => {
@@ -33,7 +34,6 @@ app.get("/", (req, res) => {
 
 // ================= AUTH =================
 
-// Signup
 app.post("/signup", async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -49,7 +49,7 @@ app.post("/signup", async (req, res) => {
       .single();
 
     if (existing) {
-      return res.status(400).json({ error: "User already exists" });
+      return res.status(400).json({ error: "User exists" });
     }
 
     const hashed = await bcrypt.hash(password, 10);
@@ -59,7 +59,7 @@ app.post("/signup", async (req, res) => {
       .insert([{ username, password: hashed }]);
 
     if (error) {
-      console.log(error);
+      console.log("SIGNUP ERROR:", error);
       return res.status(500).json({ error: "Signup failed" });
     }
 
@@ -71,7 +71,6 @@ app.post("/signup", async (req, res) => {
   }
 });
 
-// Login
 app.post("/login", async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -82,15 +81,10 @@ app.post("/login", async (req, res) => {
       .eq("username", username)
       .single();
 
-    if (!data) {
-      return res.status(401).json({ error: "User not found" });
-    }
+    if (!data) return res.status(401).json({ error: "User not found" });
 
     const valid = await bcrypt.compare(password, data.password);
-
-    if (!valid) {
-      return res.status(401).json({ error: "Wrong password" });
-    }
+    if (!valid) return res.status(401).json({ error: "Wrong password" });
 
     const token = uuidv4();
     sessions[token] = username;
@@ -107,28 +101,41 @@ app.post("/login", async (req, res) => {
 
 io.on("connection", (socket) => {
 
+  console.log("Socket connected:", socket.id);
+
   socket.on("authenticate", (token) => {
     const username = sessions[token];
 
     if (!username) {
+      console.log("Auth failed");
       socket.disconnect();
       return;
     }
 
     socket.username = username;
     onlineUsers[username] = socket.id;
+    userSockets[username] = socket;
+
+    console.log("Authenticated:", username);
 
     io.emit("onlineUsers", Object.keys(onlineUsers));
   });
 
   socket.on("joinChat", ({ withUser }) => {
+    if (!socket.username) return;
+
     const room = [socket.username, withUser].sort().join("_");
+
+    console.log(socket.username, "joined room:", room);
+
     socket.join(room);
     socket.currentChat = withUser;
   });
 
   socket.on("loadChat", async ({ withUser }) => {
-    const { data } = await supabase
+    if (!socket.username) return;
+
+    const { data, error } = await supabase
       .from("messages")
       .select("*")
       .or(
@@ -136,41 +143,67 @@ io.on("connection", (socket) => {
       )
       .order("id", { ascending: true });
 
+    if (error) {
+      console.log("LOAD ERROR:", error);
+      return;
+    }
+
     socket.emit("chatHistory", data || []);
   });
 
   socket.on("sendMessage", async ({ to, message }) => {
     const sender = socket.username;
 
+    console.log("MESSAGE:", sender, "→", to, ":", message);
+
+    if (!sender || !to || !message) {
+      console.log("Invalid message data");
+      return;
+    }
+
     const { error } = await supabase.from("messages").insert([
       { sender, receiver: to, message }
     ]);
 
     if (error) {
-      console.log("DB ERROR:", error);
+      console.log("❌ DB ERROR:", error);
       return;
     }
 
+    console.log("✅ SAVED");
+
     const room = [sender, to].sort().join("_");
 
-    // Send message
+    // Send to room
     io.to(room).emit("receiveMessage", {
       sender,
       message
     });
 
-    // 🔔 Notification (only if not in same chat)
+    // Fallback direct send (important fix)
     if (onlineUsers[to]) {
-      io.to(onlineUsers[to]).emit("notification", {
-        from: sender,
+      io.to(onlineUsers[to]).emit("receiveMessage", {
+        sender,
         message
       });
+
+      // Notification
+      if (socket.currentChat !== to) {
+        io.to(onlineUsers[to]).emit("notification", {
+          from: sender,
+          message
+        });
+      }
     }
   });
 
   socket.on("disconnect", () => {
     if (socket.username) {
+      console.log("Disconnected:", socket.username);
+
       delete onlineUsers[socket.username];
+      delete userSockets[socket.username];
+
       io.emit("onlineUsers", Object.keys(onlineUsers));
     }
   });
